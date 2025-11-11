@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kitops-ml/kitops/pkg/lib/constants"
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/remote"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 
@@ -77,11 +77,11 @@ func listImageTag(ctx context.Context, repo registry.Repository, ref *registry.R
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve reference %s: %w", ref.Reference, err)
 	}
-	manifest, config, err := util.GetManifestAndConfig(ctx, repo, manifestDesc)
-	if err != nil {
+	manifest, config, err := util.GetManifestAndKitfile(ctx, repo, manifestDesc)
+	if err != nil && !errors.Is(err, util.ErrNoKitfile) {
 		return nil, fmt.Errorf("failed to read modelkit: %w", err)
 	}
-	if manifest.Config.MediaType != constants.ModelConfigMediaType.String() {
+	if _, err := mediatype.ModelFormatForManifest(manifest); err != nil {
 		return nil, nil
 	}
 	info := &modelInfo{

@@ -28,6 +28,8 @@ import (
 
 	"github.com/kitops-ml/kitops/pkg/cmd/options"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
+	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 	"github.com/kitops-ml/kitops/pkg/output"
 )
 
@@ -158,18 +160,18 @@ func (opts *diffOptions) complete(ctx context.Context, args []string) error {
 	opts.configHome = configHome
 
 	imageName := removePrefix(args[0])
-	refA, err := registry.ParseReference(imageName)
+	refA, _, err := util.ParseReference(imageName)
 	if err != nil {
 		return fmt.Errorf("failed to parse reference for ref1: %w", err)
 	}
-	opts.refA = &refA
+	opts.refA = refA
 
 	imageName = removePrefix(args[1])
-	refB, err := registry.ParseReference(imageName)
+	refB, _, err := util.ParseReference(imageName)
 	if err != nil {
 		return fmt.Errorf("failed to parse reference for ref2: %w", err)
 	}
-	opts.refB = &refB
+	opts.refB = refB
 
 	if err := opts.NetworkOptions.Complete(ctx, args); err != nil {
 		return err
@@ -190,7 +192,7 @@ func displayLayers(title string, layers []ocispec.Descriptor) {
 		output.Infof(layerTableHeadings)
 		for _, layer := range layers {
 			output.Infof(layerTableFormat,
-				constants.FormatMediaTypeForUser(layer.MediaType),
+				mediatype.FormatMediaTypeForUser(layer.MediaType),
 				layer.Digest[:17],
 				output.FormatBytes(layer.Size))
 		}

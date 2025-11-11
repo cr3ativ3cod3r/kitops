@@ -19,10 +19,12 @@ package pull
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/local"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/remote"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
@@ -67,8 +69,12 @@ func runPullRecursive(ctx context.Context, localRepo local.LocalRepo, opts *pull
 }
 
 func pullParents(ctx context.Context, localRepo local.LocalRepo, desc ocispec.Descriptor, optsIn *pullOptions, pulledRefs []string) error {
-	_, config, err := util.GetManifestAndConfig(ctx, localRepo, desc)
+	_, config, err := util.GetManifestAndKitfile(ctx, localRepo, desc)
 	if err != nil {
+		if errors.Is(err, util.ErrNoKitfile) {
+			// If there's no Kitfile but it's otherwise a support artifact type, skip pulling parents as there aren't any
+			return nil
+		}
 		return err
 	}
 	if config.Model == nil || !util.IsModelKitReference(config.Model.Path) {
@@ -120,7 +126,7 @@ func referenceIsModel(ctx context.Context, ref *registry.Reference, repo registr
 	if err := json.Unmarshal(manifestBytes, manifest); err != nil {
 		return fmt.Errorf("failed to parse manifest: %w", err)
 	}
-	if manifest.Config.MediaType != constants.ModelConfigMediaType.String() {
+	if _, err := mediatype.ModelFormatForManifest(manifest); err != nil {
 		return fmt.Errorf("reference %s does not refer to a model", ref.String())
 	}
 	return nil

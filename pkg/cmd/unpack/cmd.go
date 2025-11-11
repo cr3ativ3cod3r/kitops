@@ -25,8 +25,8 @@ import (
 	"github.com/kitops-ml/kitops/pkg/cmd/options"
 	"github.com/kitops-ml/kitops/pkg/lib/completion"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
+	"github.com/kitops-ml/kitops/pkg/lib/filesystem/unpack"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
-	"github.com/kitops-ml/kitops/pkg/lib/unpack"
 	"github.com/kitops-ml/kitops/pkg/output"
 
 	"github.com/spf13/cobra"
@@ -112,6 +112,10 @@ func (opts *unpackOptions) complete(ctx context.Context, args []string) error {
 	modelRef, extraTags, err := util.ParseReference(args[0])
 	if err != nil {
 		return fmt.Errorf("failed to parse reference: %w", err)
+	}
+	if modelRef.Reference == "" {
+		output.Infof("No tag specified for unpack. Using 'latest' as default ('%s:latest')", args[0])
+		modelRef.Reference = "latest"
 	}
 	if len(extraTags) > 0 {
 		return fmt.Errorf("can not unpack multiple tags")

@@ -30,10 +30,12 @@ import (
 
 	"github.com/kitops-ml/kitops/pkg/artifact"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
 	"github.com/kitops-ml/kitops/pkg/lib/filesystem"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 	"github.com/kitops-ml/kitops/pkg/output"
 
+	modelspecv1 "github.com/modelpack/model-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content"
 )
@@ -79,20 +81,36 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 	if err != nil {
 		return fmt.Errorf("failed to resolve reference: %w", err)
 	}
-	manifest, config, err := util.GetManifestAndConfig(ctx, store, manifestDesc)
+
+	manifest, err := util.GetManifest(ctx, store, manifestDesc)
 	if err != nil {
-		return fmt.Errorf("failed to read model: %s", err)
+		return fmt.Errorf("failed to read manifest: %s", err)
 	}
-	if config.Model != nil && util.IsModelKitReference(config.Model.Path) {
-		output.Infof("Unpacking referenced modelkit %s", config.Model.Path)
-		if err := unpackParent(ctx, config.Model.Path, opts, visitedRefs); err != nil {
+	config, err := util.GetKitfileForManifest(ctx, store, manifest)
+	if err != nil {
+		if !errors.Is(err, util.ErrNoKitfile) {
 			return err
 		}
-	}
-
-	if shouldUnpackLayer(config, opts.FilterConfs) {
-		if err := unpackConfig(config, opts.UnpackDir, opts.Overwrite); err != nil {
-			return err
+		output.Logf(output.LogLevelWarn, "Could not get Kitfile: %s", err)
+		output.Logf(output.LogLevelWarn, "Functionality may be impacted")
+		// TODO: we can probably _also_ handle getting the model-spec config and using it here
+		genconfig, err := generateKitfileForModelPack(manifest)
+		if err != nil {
+			return fmt.Errorf("could not process manifest: %w", err)
+		}
+		config = genconfig
+	} else {
+		// These steps only make sense if we have a legitimate Kitfile available
+		if config.Model != nil && util.IsModelKitReference(config.Model.Path) {
+			output.Infof("Unpacking referenced modelkit %s", config.Model.Path)
+			if err := unpackParent(ctx, config.Model.Path, opts, visitedRefs); err != nil {
+				return err
+			}
+		}
+		if shouldUnpackLayer(config, opts.FilterConfs) {
+			if err := unpackConfig(config, opts.UnpackDir, opts.Overwrite); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -109,9 +127,14 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 		// Grab path + layer info from the config object corresponding to this layer
 		var layerPath string
 		var layerInfo *artifact.LayerInfo
-		mediaType := constants.ParseMediaType(layerDesc.MediaType)
-		switch mediaType.BaseType {
-		case constants.ModelType:
+		mediaType, err := mediatype.ParseMediaType(layerDesc.MediaType)
+		if err != nil {
+			// We may encounter unknown media types while unpacking ModelPacks, e.g. we include Kitfiles
+			// which are not ModelPack mediatypes
+			output.Logf(output.LogLevelWarn, "Unknown media type %s: skipping unpack", layerDesc.MediaType)
+		}
+		switch mediaType.Base() {
+		case mediatype.ModelBaseType:
 			if !shouldUnpackLayer(config.Model, opts.FilterConfs) {
 				continue
 			}
@@ -119,7 +142,7 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 			layerPath = config.Model.Path
 			output.Infof("Unpacking model %s to %s", config.Model.Name, filepath.Join(opts.UnpackDir, config.Model.Path))
 
-		case constants.ModelPartType:
+		case mediatype.ModelPartBaseType:
 			part := config.Model.Parts[modelPartIdx]
 			if !shouldUnpackLayer(part, opts.FilterConfs) {
 				modelPartIdx += 1
@@ -130,7 +153,7 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 			output.Infof("Unpacking model part %s to %s", part.Name, part.Path)
 			modelPartIdx += 1
 
-		case constants.CodeType:
+		case mediatype.CodeBaseType:
 			codeEntry := config.Code[codeIdx]
 			if !shouldUnpackLayer(codeEntry, opts.FilterConfs) {
 				codeIdx += 1
@@ -141,7 +164,7 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 			output.Infof("Unpacking code to %s", codeEntry.Path)
 			codeIdx += 1
 
-		case constants.DatasetType:
+		case mediatype.DatasetBaseType:
 			datasetEntry := config.DataSets[datasetIdx]
 			if !shouldUnpackLayer(datasetEntry, opts.FilterConfs) {
 				datasetIdx += 1
@@ -152,7 +175,7 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 			output.Infof("Unpacking dataset %s to %s", datasetEntry.Name, datasetEntry.Path)
 			datasetIdx += 1
 
-		case constants.DocsType:
+		case mediatype.DocsBaseType:
 			docsEntry := config.Docs[docsIdx]
 			if !shouldUnpackLayer(docsEntry, opts.FilterConfs) {
 				docsIdx += 1
@@ -162,21 +185,30 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 			layerPath = docsEntry.Path
 			output.Infof("Unpacking docs to %s", docsEntry.Path)
 			docsIdx += 1
+
+		case mediatype.ConfigBaseType:
+			// ModelPacks may contain a Kitfile in their layers, which is unpacked separately
+			continue
+
+		// Should never happen as we check earlier, but for completeness' sake:
+		case mediatype.UnknownBaseType:
+			output.Logf(output.LogLevelWarn, "Unknown media type %s: skipping unpack", layerDesc.MediaType)
 		}
 
 		if layerInfo != nil {
 			if layerInfo.Digest != layerDesc.Digest.String() {
-				return fmt.Errorf("digest in config and manifest do not match in %s", mediaType.BaseType)
+				return fmt.Errorf("digest in config and manifest do not match in %s", mediaType.UserString())
 			}
 			relPath = ""
 		} else {
 			_, relPath, err = filesystem.VerifySubpath(opts.UnpackDir, layerPath)
 			if err != nil {
-				return fmt.Errorf("error resolving %s path: %w", mediaType.BaseType, err)
+				return fmt.Errorf("error resolving %s path: %w", mediaType.UserString(), err)
 			}
 		}
 
-		if err := unpackLayer(ctx, store, layerDesc, relPath, opts.Overwrite, opts.IgnoreExisting, mediaType.Compression); err != nil {
+		// TODO: handle DiffIDs when unpacking layers
+		if err := unpackLayer(ctx, store, layerDesc, relPath, opts.Overwrite, opts.IgnoreExisting, mediaType.Compression()); err != nil {
 			return fmt.Errorf("failed to unpack: %w", err)
 		}
 	}
@@ -211,9 +243,9 @@ func unpackParent(ctx context.Context, ref string, optsIn *UnpackOptions, visite
 	} else {
 		var filterConfs []FilterConf
 		for _, conf := range opts.FilterConfs {
-			if conf.matchesBaseType(constants.ModelType) {
+			if conf.matchesBaseType(mediatype.ModelBaseType) {
 				// Drop any other base types from this filter
-				conf.BaseTypes = []string{constants.ModelType}
+				conf.BaseTypes = []mediatype.BaseType{mediatype.ModelBaseType}
 				filterConfs = append(filterConfs, conf)
 			}
 		}
@@ -262,7 +294,7 @@ func unpackConfig(config *artifact.KitFile, unpackDir string, overwrite bool) er
 	return nil
 }
 
-func unpackLayer(ctx context.Context, store content.Storage, desc ocispec.Descriptor, unpackPath string, overwrite, ignoreExisting bool, compression string) error {
+func unpackLayer(ctx context.Context, store content.Storage, desc ocispec.Descriptor, unpackPath string, overwrite, ignoreExisting bool, compression mediatype.CompressionType) error {
 	rc, err := store.Fetch(ctx, desc)
 	if err != nil {
 		return fmt.Errorf("failed get layer %s: %w", desc.Digest, err)
@@ -274,9 +306,9 @@ func unpackLayer(ctx context.Context, store content.Storage, desc ocispec.Descri
 	var cr io.ReadCloser
 	var cErr error
 	switch compression {
-	case constants.GzipCompression, constants.GzipFastestCompression:
+	case mediatype.GzipCompression, mediatype.GzipFastestCompression:
 		cr, cErr = gzip.NewReader(rc)
-	case constants.NoneCompression:
+	case mediatype.NoneCompression:
 		cr = rc
 	}
 	if cErr != nil {
@@ -375,4 +407,41 @@ func getIndex(list []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// generateKitfileForModelPack generates a "Kitfile" for a manifest that otherwise does not contain one.
+// This is a minimal Kitfile suitable only for unpacking, containing a path for every layer. If a layer
+// does not use the 'org.cncf.model.filepath' annotation, an error is returned.
+func generateKitfileForModelPack(manifest *ocispec.Manifest) (*artifact.KitFile, error) {
+	if format, err := mediatype.ModelFormatForManifest(manifest); err != nil || format != mediatype.ModelPackFormat {
+		return nil, fmt.Errorf("not a modelpack artifact")
+	}
+	kf := &artifact.KitFile{
+		Model: &artifact.Model{},
+	}
+	for _, desc := range manifest.Layers {
+		if desc.Annotations == nil || desc.Annotations[modelspecv1.AnnotationFilepath] == "" {
+			return nil, fmt.Errorf("unknown file path for layer: no %s annotation", modelspecv1.AnnotationFilepath)
+		}
+		filepath := desc.Annotations[modelspecv1.AnnotationFilepath]
+		mt, err := mediatype.ParseMediaType(desc.MediaType)
+		if err != nil {
+			return nil, err
+		}
+		switch mt.Base() {
+		case mediatype.ModelBaseType:
+			kf.Model.Path = filepath
+		case mediatype.ModelPartBaseType:
+			kf.Model.Parts = append(kf.Model.Parts, artifact.ModelPart{Path: filepath})
+		case mediatype.CodeBaseType:
+			kf.Code = append(kf.Code, artifact.Code{Path: filepath})
+		case mediatype.DatasetBaseType:
+			kf.DataSets = append(kf.DataSets, artifact.DataSet{Path: filepath})
+		case mediatype.DocsBaseType:
+			kf.Docs = append(kf.Docs, artifact.Docs{Path: filepath})
+		default:
+			return nil, fmt.Errorf("unknown layer type: %s", mt)
+		}
+	}
+	return kf, nil
 }

@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package kitfile
+package filesystem
 
 import (
 	"archive/tar"
@@ -22,42 +22,41 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/kitops-ml/kitops/pkg/artifact"
-	"github.com/kitops-ml/kitops/pkg/lib/constants"
-	"github.com/kitops-ml/kitops/pkg/lib/filesystem"
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
 	"github.com/kitops-ml/kitops/pkg/lib/filesystem/cache"
+	"github.com/kitops-ml/kitops/pkg/lib/filesystem/ignore"
 	"github.com/kitops-ml/kitops/pkg/output"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-// compressLayer compresses an *artifact.ModelLayer to a gzipped tar file. In order to return
+// packLayerToTar compresses an *artifact.ModelLayer to a gzipped tar file. In order to return
 // a descriptor (including hash) for the compressed file, the layer is saved to a temporary file
 // on disk and must be moved to an appropriate location. It is the responsibility of the caller
 // to clean up the temporary file when it is no longer needed.
-func compressLayer(path string, mediaType constants.MediaType, ignore filesystem.IgnorePaths) (tempFilePath string, desc ocispec.Descriptor, layerInfo *artifact.LayerInfo, err error) {
+func packLayerToTar(path string, mediaType mediatype.MediaType, ignore ignore.Paths) (tempFilePath string, desc ocispec.Descriptor, layerInfo *artifact.LayerInfo, err error) {
 	// Clean path to ensure consistent format (./path vs path/ vs path)
 	path = filepath.Clean(path)
 
 	if layerIgnored, err := ignore.Matches(path, path); err != nil {
 		return "", ocispec.DescriptorEmptyJSON, nil, err
 	} else if layerIgnored {
-		output.Errorf("Warning: %s layer path %s ignored by kitignore", mediaType.BaseType, path)
+		output.Errorf("Warning: %s layer path %s ignored by kitignore", mediaType.UserString(), path)
 	}
 
 	totalSize, err := getTotalSize(path, ignore)
 	if err != nil {
-		return "", ocispec.DescriptorEmptyJSON, nil, fmt.Errorf("error processing %s: %w", mediaType.BaseType, err)
+		return "", ocispec.DescriptorEmptyJSON, nil, fmt.Errorf("error processing %s: %w", mediaType.UserString(), err)
 	}
 	if totalSize == 0 {
-		output.Logf(output.LogLevelWarn, "No files detected in %s layer with path %s", mediaType.BaseType, path)
+		output.Logf(output.LogLevelWarn, "No files detected in %s layer with path %s", mediaType.UserString(), path)
 	}
 
 	tempFile, tempFileCleanup, err := cache.MkCacheFile(cache.CachePackSubdir, "kitops_layer_")
@@ -73,13 +72,13 @@ func compressLayer(path string, mediaType constants.MediaType, ignore filesystem
 
 	var compressedWriter io.WriteCloser
 	var tarWriter *tar.Writer
-	switch mediaType.Compression {
-	case constants.GzipCompression:
+	switch mediaType.Compression() {
+	case mediatype.GzipCompression:
 		compressedWriter = gzip.NewWriter(fileWriter)
 		diffIdDigester = digest.Canonical.Digester()
 		mw := io.MultiWriter(compressedWriter, diffIdDigester.Hash())
 		tarWriter = tar.NewWriter(mw)
-	case constants.GzipFastestCompression:
+	case mediatype.GzipFastestCompression:
 		compressedWriter, err = gzip.NewWriterLevel(fileWriter, gzip.BestSpeed)
 		if err != nil {
 			return "", ocispec.DescriptorEmptyJSON, nil, fmt.Errorf("failed to set up gzip compression: %w", err)
@@ -87,9 +86,11 @@ func compressLayer(path string, mediaType constants.MediaType, ignore filesystem
 		diffIdDigester = digest.Canonical.Digester()
 		mw := io.MultiWriter(compressedWriter, diffIdDigester.Hash())
 		tarWriter = tar.NewWriter(mw)
-	case constants.NoneCompression:
+	case mediatype.NoneCompression:
 		tarWriter = tar.NewWriter(fileWriter)
 		diffIdDigester = digester
+	default:
+		return "", ocispec.DescriptorEmptyJSON, nil, fmt.Errorf("Unsupported compression format: %s", mediaType.Compression())
 	}
 	progressTarWriter, plog := output.TarProgress(totalSize, tarWriter)
 
@@ -122,6 +123,10 @@ func compressLayer(path string, mediaType constants.MediaType, ignore filesystem
 		Digest:    digester.Digest(),
 		Size:      tempFileInfo.Size(),
 	}
+	if err := fillDescAnnotations(&desc, path, nil); err != nil {
+		return "", ocispec.DescriptorEmptyJSON, nil, err
+	}
+
 	layerInfo = &artifact.LayerInfo{
 		Digest: digester.Digest().String(),
 		DiffId: diffIdDigester.Digest().String(),
@@ -129,7 +134,7 @@ func compressLayer(path string, mediaType constants.MediaType, ignore filesystem
 	return tempFileName, desc, layerInfo, nil
 }
 
-func writeLayerToTar(basePath string, ignore filesystem.IgnorePaths, tarWriter *output.ProgressTar, plog *output.ProgressLogger) error {
+func writeLayerToTar(basePath string, ignore ignore.Paths, tarWriter *output.ProgressTar, plog *output.ProgressLogger) error {
 	// Make sure target path exists; otherwise we'll miss it while walking below
 	_, err := os.Stat(basePath)
 	if err != nil {
@@ -227,57 +232,6 @@ func writeFileToTar(file string, fi os.FileInfo, ptw *output.ProgressTar, plog *
 	}
 	plog.Debugf("Wrote file %s to tar file", file)
 	return nil
-}
-
-func getTotalSize(basePath string, ignore filesystem.IgnorePaths) (int64, error) {
-	pathInfo, err := os.Stat(basePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, fmt.Errorf("path %s does not exist", basePath)
-		}
-		return 0, err
-	}
-
-	if pathInfo.Mode().IsRegular() {
-		return pathInfo.Size(), nil
-	} else if pathInfo.IsDir() {
-		var total int64
-		err := filepath.WalkDir(basePath, func(file string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if shouldIgnore, err := ignore.Matches(file, basePath); err != nil {
-				return fmt.Errorf("failed to match %s against ignore file: %w", file, err)
-			} else if shouldIgnore {
-				if !ignore.HasExclusions() && d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if d.Type().IsRegular() {
-				fi, err := d.Info()
-				if err != nil {
-					return fmt.Errorf("failed to stat %s: %w", file, err)
-				}
-				total += fi.Size()
-			}
-			return nil
-		})
-		if err != nil {
-			return 0, err
-		}
-		return total, nil
-	} else {
-		return 0, fmt.Errorf("path %s is neither a file nor a directory", basePath)
-	}
-}
-
-// callAndPrintError is a wrapper to print an error message for a function that
-// may return an error. The error is printed and then discarded.
-func callAndPrintError(f func() error, msg string) {
-	if err := f(); err != nil {
-		output.Errorf(msg, err)
-	}
 }
 
 func sanitizeTarHeader(header *tar.Header) {

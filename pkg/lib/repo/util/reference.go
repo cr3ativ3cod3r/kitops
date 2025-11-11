@@ -26,6 +26,7 @@ import (
 
 	"github.com/kitops-ml/kitops/pkg/artifact"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -104,7 +105,6 @@ func ParseReference(refString string) (reference *registry.Reference, extraTags 
 		ref = unprocessed[index+1:]
 	} else {
 		// No tag or digest
-		ref = "latest"
 		repo = unprocessed
 	}
 
@@ -175,16 +175,17 @@ func RepoPath(storagePath string, ref *registry.Reference) string {
 	return filepath.Join(storagePath, ref.Registry, ref.Repository)
 }
 
-// GetManifestAndConfig returns the manifest and config (Kitfile) for a manifest Descriptor.
-// Calls GetManifest and GetConfig.
-func GetManifestAndConfig(ctx context.Context, store oras.ReadOnlyTarget, manifestDesc ocispec.Descriptor) (*ocispec.Manifest, *artifact.KitFile, error) {
+// GetManifestAndKitfile returns the manifest and config (Kitfile) for a manifest Descriptor.
+// Calls GetManifest and GetKitfileForManifest. If the manifest is retrieved but no Kitfile
+// can be found, returns the manifest and error equal to ErrNoKitfile
+func GetManifestAndKitfile(ctx context.Context, store oras.ReadOnlyTarget, manifestDesc ocispec.Descriptor) (*ocispec.Manifest, *artifact.KitFile, error) {
 	manifest, err := GetManifest(ctx, store, manifestDesc)
 	if err != nil {
 		return nil, nil, err
 	}
-	config, err := GetConfig(ctx, store, manifest.Config)
+	config, err := GetKitfileForManifest(ctx, store, manifest)
 	if err != nil {
-		return nil, nil, err
+		return manifest, nil, err
 	}
 	return manifest, config, nil
 }
@@ -200,17 +201,49 @@ func GetManifest(ctx context.Context, store oras.ReadOnlyTarget, manifestDesc oc
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return nil, fmt.Errorf("failed to parse manifest %s: %w", manifestDesc.Digest, err)
 	}
-	if manifest.Config.MediaType != constants.ModelConfigMediaType.String() {
+	if _, err := mediatype.ModelFormatForManifest(manifest); err != nil {
 		return nil, ErrNotAModelKit
 	}
 
 	return manifest, nil
 }
 
+// GetKitfileForManifest returns the Kitfile for a given manifest, either by retrieving it from an
+// OCI store or by reading it from manifest annotations. If manifest type is unrecognized, returns
+// ErrNotAModelKit. If the manifest is recognized but does not contain a Kitfile (e.g. it was not
+// created by Kit), returns ErrNoKitfile.
+func GetKitfileForManifest(ctx context.Context, store oras.ReadOnlyTarget, manifest *ocispec.Manifest) (*artifact.KitFile, error) {
+	modelFormat, err := mediatype.ModelFormatForManifest(manifest)
+	if err != nil {
+		return nil, ErrNotAModelKit
+	}
+	switch modelFormat {
+	case mediatype.KitFormat:
+		return GetConfig(ctx, store, manifest.Config)
+	case mediatype.ModelPackFormat:
+		// TODO: can we (try to) generate a Kitfile from a ModelPack manifest?
+		if manifest.Annotations == nil || manifest.Annotations[constants.KitfileJsonAnnotation] == "" {
+			return nil, ErrNoKitfile
+		}
+		kfstring := manifest.Annotations[constants.KitfileJsonAnnotation]
+		kitfile := &artifact.KitFile{}
+		if err := json.Unmarshal([]byte(kfstring), kitfile); err != nil {
+			return nil, fmt.Errorf("failed to parse config: %w", err)
+		}
+		return kitfile, nil
+	default:
+		// Won't happen but necessary for completeness
+		return nil, fmt.Errorf("unknown artifact type")
+	}
+}
+
 // GetConfig returns the config (Kitfile) described by a descriptor. Returns an error if the config blob cannot
 // be resolved or if the descriptor does not describe a Kitfile.
 func GetConfig(ctx context.Context, store oras.ReadOnlyTarget, configDesc ocispec.Descriptor) (*artifact.KitFile, error) {
-	if configDesc.MediaType != constants.ModelConfigMediaType.String() {
+	if configDesc.MediaType == "" || configDesc.MediaType == ocispec.MediaTypeEmptyJSON {
+		return nil, fmt.Errorf("manifest does not have a config section")
+	}
+	if configDesc.MediaType != mediatype.KitConfigMediaType.String() {
 		return nil, fmt.Errorf("configuration descriptor does not describe a Kitfile")
 	}
 	configBytes, err := content.FetchAll(ctx, store, configDesc)
@@ -238,15 +271,16 @@ func ResolveManifest(ctx context.Context, store oras.Target, reference string) (
 }
 
 // ResolveManifestAndConfig returns the manifest and config (Kitfile) for a given reference (tag), if present
-// in the store. Calls ResolveManifest and GetConfig.
+// in the store. Calls GetManifest and GetKitfileForManifest. If the manifest is retrieved but no Kitfile
+// can be found, returns the manifest and error equal to ErrNoKitfile
 func ResolveManifestAndConfig(ctx context.Context, store oras.Target, reference string) (ocispec.Descriptor, *ocispec.Manifest, *artifact.KitFile, error) {
 	desc, manifest, err := ResolveManifest(ctx, store, reference)
 	if err != nil {
 		return ocispec.DescriptorEmptyJSON, nil, nil, err
 	}
-	config, err := GetConfig(ctx, store, manifest.Config)
+	config, err := GetKitfileForManifest(ctx, store, manifest)
 	if err != nil {
-		return ocispec.DescriptorEmptyJSON, nil, nil, err
+		return desc, manifest, nil, err
 	}
 	return desc, manifest, config, nil
 }

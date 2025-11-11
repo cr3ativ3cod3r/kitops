@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kitops-ml/kitops/pkg/lib/constants/mediatype"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
@@ -55,14 +56,15 @@ kit pack . -f /path/to/your/Kitfile -t registry/repository:modelv1`
 )
 
 type packOptions struct {
-	modelFile   string
-	contextDir  string
-	configHome  string
-	storageHome string
-	fullTagRef  string
-	compression string
-	modelRef    *registry.Reference
-	extraRefs   []string
+	modelFile    string
+	contextDir   string
+	configHome   string
+	storageHome  string
+	fullTagRef   string
+	compression  string
+	modelRef     *registry.Reference
+	extraRefs    []string
+	useModelPack bool
 }
 
 func PackCommand() *cobra.Command {
@@ -78,6 +80,7 @@ func PackCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&opts.modelFile, "file", "f", "", "Specifies the path to the Kitfile explicitly (use \"-\" to read from standard input)")
 	cmd.Flags().StringVarP(&opts.fullTagRef, "tag", "t", "", "Assigns one or more tags to the built modelkit. Example: -t registry/repository:tag1,tag2")
 	cmd.Flags().StringVar(&opts.compression, "compression", "none", "Compression format to use for layers. Valid options: 'none' (default), 'gzip', 'gzip-fastest'")
+	cmd.Flags().BoolVar(&opts.useModelPack, "use-model-pack", false, "Pack model in ModelPack format instead of ModelKit")
 	cmd.Flags().SortFlags = false
 	cmd.Args = cobra.ExactArgs(1)
 	cmd.CompletionOptions.SetDefaultShellCompDirective(cobra.ShellCompDirectiveDefault)
@@ -132,13 +135,17 @@ func (opts *packOptions) complete(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to parse reference: %w", err)
 		}
+		if modelRef.Reference == "" {
+			output.Infof("No tag or digest specified with --tag flag. Using 'latest' as default ('%s:latest')", opts.fullTagRef)
+			modelRef.Reference = "latest"
+		}
 		opts.modelRef = modelRef
 		opts.extraRefs = extraRefs
 	} else {
 		opts.modelRef = util.DefaultReference()
 	}
 
-	if err := constants.IsValidCompression(opts.compression); err != nil {
+	if err := mediatype.IsValidCompression(opts.compression); err != nil {
 		return err
 	}
 
