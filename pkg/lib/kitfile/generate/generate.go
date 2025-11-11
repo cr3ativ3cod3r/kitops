@@ -270,6 +270,10 @@ func addDirToKitfile(kitfile *artifact.KitFile, dir DirectoryListing) (modelFile
 }
 
 func determineFileType(filename string) fileType {
+	if strings.Contains(filename, ".prompt") {
+		return fileTypeCode
+	}
+
 	if anySuffix(filename, modelWeightsSuffixes) {
 		return fileTypeModel
 	}
