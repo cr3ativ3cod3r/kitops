@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/kitops-ml/kitops/pkg/artifact"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
@@ -32,6 +33,7 @@ import (
 	"github.com/kitops-ml/kitops/pkg/lib/repo/local"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 	"github.com/kitops-ml/kitops/pkg/output"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
@@ -136,60 +138,113 @@ func saveConfig(ctx context.Context, localRepo local.LocalRepo, kitfile *artifac
 }
 
 func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *artifact.KitFile, ignore ignore.Paths, opts *SaveModelOptions) (layers []ocispec.Descriptor, diffIDs []digest.Digest, err error) {
+
+	var (
+		eg, egCtx = errgroup.WithContext(ctx)
+	)
+
+	type layerResult struct {
+		layer  ocispec.Descriptor
+		diffID digest.Digest
+		index  int
+	}
+
+	results := make(chan layerResult, 100)
+	currentIndex := 0
+
 	if kitfile.Model != nil {
 		if kitfile.Model.Path != "" && !util.IsModelKitReference(kitfile.Model.Path) {
-			mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(ctx, localRepo, kitfile.Model.Path, mediaType, ignore)
-			if err != nil {
-				return nil, nil, err
-			}
-			layers = append(layers, layer)
-			diffIDs = append(diffIDs, digest.FromString(layerInfo.DiffId))
-			kitfile.Model.LayerInfo = layerInfo
+			currentIndex++
+			eg.Go(func() error {
+				mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelBaseType, opts.LayerFormat, opts.Compression)
+				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, kitfile.Model.Path, mediaType, ignore)
+				if err != nil {
+					return err
+				}
+				kitfile.Model.LayerInfo = layerInfo
+				results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+				return nil
+			})
 		}
 		for idx, part := range kitfile.Model.Parts {
-			mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelPartBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(ctx, localRepo, part.Path, mediaType, ignore)
-			if err != nil {
-				return nil, nil, err
-			}
-			layers = append(layers, layer)
-			diffIDs = append(diffIDs, digest.FromString(layerInfo.DiffId))
-			kitfile.Model.Parts[idx].LayerInfo = layerInfo
+			currentIndex++
+			index := idx
+			eg.Go(func() error {
+				mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelPartBaseType, opts.LayerFormat, opts.Compression)
+				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, part.Path, mediaType, ignore)
+				if err != nil {
+					return err
+				}
+				kitfile.Model.Parts[index].LayerInfo = layerInfo
+				results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+				return nil
+			})
 		}
 	}
 	for idx, code := range kitfile.Code {
-		mediaType := mediatype.New(opts.ModelFormat, mediatype.CodeBaseType, opts.LayerFormat, opts.Compression)
-		layer, layerInfo, err := saveContentLayer(ctx, localRepo, code.Path, mediaType, ignore)
-		if err != nil {
-			return nil, nil, err
-		}
-		layers = append(layers, layer)
-		diffIDs = append(diffIDs, digest.FromString(layerInfo.DiffId))
-		kitfile.Code[idx].LayerInfo = layerInfo
+		currentIndex++
+		index := idx
+		eg.Go(func() error {
+			mediaType := mediatype.New(opts.ModelFormat, mediatype.CodeBaseType, opts.LayerFormat, opts.Compression)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, code.Path, mediaType, ignore)
+			if err != nil {
+				return err
+			}
+			kitfile.Code[index].LayerInfo = layerInfo
+			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+			return nil
+		})
 	}
 	for idx, dataset := range kitfile.DataSets {
-		mediaType := mediatype.New(opts.ModelFormat, mediatype.DatasetBaseType, opts.LayerFormat, opts.Compression)
-		layer, layerInfo, err := saveContentLayer(ctx, localRepo, dataset.Path, mediaType, ignore)
-		if err != nil {
-			return nil, nil, err
-		}
-		layers = append(layers, layer)
-		diffIDs = append(diffIDs, digest.FromString(layerInfo.DiffId))
-		kitfile.DataSets[idx].LayerInfo = layerInfo
+		currentIndex++
+		index := idx
+		eg.Go(func() error {
+			mediaType := mediatype.New(opts.ModelFormat, mediatype.DatasetBaseType, opts.LayerFormat, opts.Compression)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, dataset.Path, mediaType, ignore)
+			if err != nil {
+				return err
+			}
+			kitfile.DataSets[index].LayerInfo = layerInfo
+			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+			return nil
+		})
 	}
 	for idx, docs := range kitfile.Docs {
-		mediaType := mediatype.New(opts.ModelFormat, mediatype.DocsBaseType, opts.LayerFormat, opts.Compression)
-		layer, layerInfo, err := saveContentLayer(ctx, localRepo, docs.Path, mediaType, ignore)
-		if err != nil {
-			return nil, nil, err
-		}
-		layers = append(layers, layer)
-		diffIDs = append(diffIDs, digest.FromString(layerInfo.DiffId))
-		kitfile.Docs[idx].LayerInfo = layerInfo
+		currentIndex++
+		index := idx
+		eg.Go(func() error {
+			mediaType := mediatype.New(opts.ModelFormat, mediatype.DocsBaseType, opts.LayerFormat, opts.Compression)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, docs.Path, mediaType, ignore)
+			if err != nil {
+				return err
+			}
+			kitfile.Docs[index].LayerInfo = layerInfo
+			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+			return nil
+		})
 	}
 
-	return layers, diffIDs, nil
+	if err = eg.Wait(); err != nil {
+		close(results)
+		return nil, nil, err
+	}
+
+	resultsStore := []layerResult{}
+	close(results)
+	for j := range results {
+		resultsStore = append(resultsStore, j)
+	}
+
+	sort.SliceStable(resultsStore, func(i, j int) bool {
+		return resultsStore[i].index < resultsStore[j].index
+	})
+
+	for j := range resultsStore {
+		layers = append(layers, resultsStore[j].layer)
+		diffIDs = append(diffIDs, resultsStore[j].diffID)
+	}
+
+	return layers, diffIDs, err
 }
 
 func saveContentLayer(ctx context.Context, localRepo local.LocalRepo, path string, mediaType mediatype.MediaType, ignore ignore.Paths) (ocispec.Descriptor, *artifact.LayerInfo, error) {

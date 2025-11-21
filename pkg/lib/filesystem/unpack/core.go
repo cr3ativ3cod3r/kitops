@@ -34,6 +34,7 @@ import (
 	"github.com/kitops-ml/kitops/pkg/lib/filesystem"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 	"github.com/kitops-ml/kitops/pkg/output"
+	"golang.org/x/sync/errgroup"
 
 	modelspecv1 "github.com/modelpack/model-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -67,6 +68,9 @@ func UnpackModelKit(ctx context.Context, opts *UnpackOptions) error {
 }
 
 func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []string) error {
+
+	eg, egCtx := errgroup.WithContext(ctx)
+
 	if len(visitedRefs) > constants.MaxModelRefChain {
 		return fmt.Errorf("reached maximum number of model references: [%s]", strings.Join(visitedRefs, "=>"))
 	}
@@ -208,9 +212,16 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 		}
 
 		// TODO: handle DiffIDs when unpacking layers
-		if err := unpackLayer(ctx, store, layerDesc, relPath, opts.Overwrite, opts.IgnoreExisting, mediaType.Compression()); err != nil {
-			return fmt.Errorf("failed to unpack: %w", err)
-		}
+		eg.Go(func() error {
+			if err := unpackLayer(egCtx, store, layerDesc, relPath, opts.Overwrite, opts.IgnoreExisting, mediaType.Compression()); err != nil {
+				return fmt.Errorf("failed to unpack: %w", err)
+			}
+			return nil
+		})
+
+	}
+	if err = eg.Wait(); err != nil {
+		return err
 	}
 	output.Debugf("Unpacked %d model part layers", modelPartIdx)
 	output.Debugf("Unpacked %d code layers", codeIdx)
