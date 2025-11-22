@@ -123,7 +123,8 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 	// We need to support older ModelKits (that were packed without diffIDs and digest
 	// in the config) for now, so we need to continue using the old structure.
 	var modelPartIdx, codeIdx, datasetIdx, docsIdx int
-	for _, layerDesc := range manifest.Layers {
+	for index := range manifest.Layers {
+		layerDesc := manifest.Layers[index]
 		// This variable supports older-format tar layers (that don't include the
 		// layer path). For current ModelKits, this will be empty
 		var relPath string
@@ -211,9 +212,13 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 			}
 		}
 
+		layerDescCopy := layerDesc
+		relPathCopy := relPath
+		compressionCopy := mediaType.Compression()
+
 		// TODO: handle DiffIDs when unpacking layers
 		eg.Go(func() error {
-			if err := unpackLayer(egCtx, store, layerDesc, relPath, opts.Overwrite, opts.IgnoreExisting, mediaType.Compression()); err != nil {
+			if err := unpackLayer(egCtx, store, layerDescCopy, relPathCopy, opts.Overwrite, opts.IgnoreExisting, compressionCopy); err != nil {
 				return fmt.Errorf("failed to unpack: %w", err)
 			}
 			return nil

@@ -154,6 +154,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 
 	if kitfile.Model != nil {
 		if kitfile.Model.Path != "" && !util.IsModelKitReference(kitfile.Model.Path) {
+			currentIndexCopy := currentIndex
 			currentIndex++
 			eg.Go(func() error {
 				mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelBaseType, opts.LayerFormat, opts.Compression)
@@ -162,64 +163,72 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 					return err
 				}
 				kitfile.Model.LayerInfo = layerInfo
-				results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+				results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndexCopy}
 				return nil
 			})
 		}
 		for idx, part := range kitfile.Model.Parts {
+			currentIndexCopy := currentIndex
 			currentIndex++
 			index := idx
+			path := part.Path
 			eg.Go(func() error {
 				mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelPartBaseType, opts.LayerFormat, opts.Compression)
-				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, part.Path, mediaType, ignore)
+				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
 				if err != nil {
 					return err
 				}
 				kitfile.Model.Parts[index].LayerInfo = layerInfo
-				results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+				results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndexCopy}
 				return nil
 			})
 		}
 	}
 	for idx, code := range kitfile.Code {
+		currentIndexCopy := currentIndex
 		currentIndex++
 		index := idx
+		path := code.Path
 		eg.Go(func() error {
 			mediaType := mediatype.New(opts.ModelFormat, mediatype.CodeBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, code.Path, mediaType, ignore)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
 			if err != nil {
 				return err
 			}
 			kitfile.Code[index].LayerInfo = layerInfo
-			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndexCopy}
 			return nil
 		})
 	}
 	for idx, dataset := range kitfile.DataSets {
+		currentIndexCopy := currentIndex
 		currentIndex++
 		index := idx
+		path := dataset.Path
 		eg.Go(func() error {
 			mediaType := mediatype.New(opts.ModelFormat, mediatype.DatasetBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, dataset.Path, mediaType, ignore)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
 			if err != nil {
 				return err
 			}
 			kitfile.DataSets[index].LayerInfo = layerInfo
-			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndexCopy}
 			return nil
 		})
 	}
 	for idx, docs := range kitfile.Docs {
+		currentIndexCopy := currentIndex
 		currentIndex++
 		index := idx
+		path := docs.Path
 		eg.Go(func() error {
 			mediaType := mediatype.New(opts.ModelFormat, mediatype.DocsBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, docs.Path, mediaType, ignore)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
 			if err != nil {
 				return err
 			}
 			kitfile.Docs[index].LayerInfo = layerInfo
-			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndex}
+			results <- layerResult{layer: layer, diffID: digest.FromString(layerInfo.DiffId), index: currentIndexCopy}
 			return nil
 		})
 	}
