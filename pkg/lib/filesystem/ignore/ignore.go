@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	kfutils "github.com/kitops-ml/kitops/pkg/lib/repo/util"
 
@@ -63,9 +64,12 @@ func New(kitIgnorePaths []string, kitfile *artifact.KitFile, extraLayers ...stri
 type ignorePaths struct {
 	ignoreFileMatcher *patternmatcher.PatternMatcher
 	layers            []string
+	mu                sync.Mutex
 }
 
 func (pm *ignorePaths) Matches(path, layerPath string) (bool, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 	path = cleanPath(path)
 	layerPath = cleanPath(layerPath)
 	ignoreFileMatches, err := pm.ignoreFileMatcher.MatchesOrParentMatches(path)
