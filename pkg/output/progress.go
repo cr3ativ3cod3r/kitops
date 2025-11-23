@@ -138,15 +138,11 @@ func WrapTarget(wrap oras.Target) (oras.Target, *ProgressLogger) {
 	}, &ProgressLogger{p}
 }
 
-func WrapUnpackReadCloser(size int64, rc io.ReadCloser) (io.ReadCloser, *ProgressLogger) {
+func WrapUnpackReadCloser(size int64, rc io.ReadCloser, p *mpb.Progress) (io.ReadCloser, *ProgressLogger) {
 	if !progressEnabled {
 		return rc, &ProgressLogger{stdout}
 	}
 
-	p := mpb.New(
-		mpb.WithWidth(60),
-		mpb.WithRefreshRate(150*time.Millisecond),
-	)
 	bar := p.New(size,
 		barStyle(),
 		mpb.PrependDecorators(
@@ -187,15 +183,11 @@ func (t *ProgressTar) Close() error {
 	return nil
 }
 
-func TarProgress(total int64, tw *tar.Writer) (*ProgressTar, *ProgressLogger) {
+func TarProgress(total int64, tw *tar.Writer, p *mpb.Progress) (*ProgressTar, *ProgressLogger) {
 	if !progressEnabled || total == 0 {
 		return &ProgressTar{tw: tw}, &ProgressLogger{stdout}
 	}
 
-	p := mpb.New(
-		mpb.WithWidth(60),
-		mpb.WithRefreshRate(150*time.Millisecond),
-	)
 	bar := p.New(total,
 		barStyle(),
 		mpb.PrependDecorators(

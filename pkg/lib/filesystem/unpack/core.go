@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kitops-ml/kitops/pkg/artifact"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
@@ -34,6 +35,7 @@ import (
 	"github.com/kitops-ml/kitops/pkg/lib/filesystem"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 	"github.com/kitops-ml/kitops/pkg/output"
+	"github.com/vbauerster/mpb/v8"
 	"golang.org/x/sync/errgroup"
 
 	modelspecv1 "github.com/modelpack/model-spec/specs-go/v1"
@@ -123,6 +125,11 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 	// We need to support older ModelKits (that were packed without diffIDs and digest
 	// in the config) for now, so we need to continue using the old structure.
 	var modelPartIdx, codeIdx, datasetIdx, docsIdx int
+
+	progress := mpb.New(
+		mpb.WithWidth(60),
+		mpb.WithRefreshRate(150*time.Millisecond),
+	)
 	for index := range manifest.Layers {
 		layerDesc := manifest.Layers[index]
 		// This variable supports older-format tar layers (that don't include the
@@ -218,7 +225,7 @@ func unpackRecursive(ctx context.Context, opts *UnpackOptions, visitedRefs []str
 
 		// TODO: handle DiffIDs when unpacking layers
 		eg.Go(func() error {
-			if err := unpackLayer(egCtx, store, layerDescCopy, relPathCopy, opts.Overwrite, opts.IgnoreExisting, compressionCopy); err != nil {
+			if err := unpackLayer(egCtx, store, layerDescCopy, relPathCopy, opts.Overwrite, opts.IgnoreExisting, compressionCopy, progress); err != nil {
 				return fmt.Errorf("failed to unpack: %w", err)
 			}
 			return nil
@@ -310,13 +317,13 @@ func unpackConfig(config *artifact.KitFile, unpackDir string, overwrite bool) er
 	return nil
 }
 
-func unpackLayer(ctx context.Context, store content.Storage, desc ocispec.Descriptor, unpackPath string, overwrite, ignoreExisting bool, compression mediatype.CompressionType) error {
+func unpackLayer(ctx context.Context, store content.Storage, desc ocispec.Descriptor, unpackPath string, overwrite, ignoreExisting bool, compression mediatype.CompressionType, progress *mpb.Progress) error {
 	rc, err := store.Fetch(ctx, desc)
 	if err != nil {
 		return fmt.Errorf("failed get layer %s: %w", desc.Digest, err)
 	}
 	var logger *output.ProgressLogger
-	rc, logger = output.WrapUnpackReadCloser(desc.Size, rc)
+	rc, logger = output.WrapUnpackReadCloser(desc.Size, rc, progress)
 	defer rc.Close()
 
 	var cr io.ReadCloser

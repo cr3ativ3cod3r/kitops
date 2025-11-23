@@ -32,6 +32,7 @@ import (
 	"github.com/kitops-ml/kitops/pkg/lib/filesystem/cache"
 	"github.com/kitops-ml/kitops/pkg/lib/filesystem/ignore"
 	"github.com/kitops-ml/kitops/pkg/output"
+	"github.com/vbauerster/mpb/v8"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -41,7 +42,7 @@ import (
 // a descriptor (including hash) for the compressed file, the layer is saved to a temporary file
 // on disk and must be moved to an appropriate location. It is the responsibility of the caller
 // to clean up the temporary file when it is no longer needed.
-func packLayerToTar(path string, mediaType mediatype.MediaType, ignore ignore.Paths) (tempFilePath string, desc ocispec.Descriptor, layerInfo *artifact.LayerInfo, err error) {
+func packLayerToTar(path string, mediaType mediatype.MediaType, ignore ignore.Paths, progress *mpb.Progress) (tempFilePath string, desc ocispec.Descriptor, layerInfo *artifact.LayerInfo, err error) {
 	// Clean path to ensure consistent format (./path vs path/ vs path)
 	path = filepath.Clean(path)
 
@@ -92,7 +93,7 @@ func packLayerToTar(path string, mediaType mediatype.MediaType, ignore ignore.Pa
 	default:
 		return "", ocispec.DescriptorEmptyJSON, nil, fmt.Errorf("Unsupported compression format: %s", mediaType.Compression())
 	}
-	progressTarWriter, plog := output.TarProgress(totalSize, tarWriter)
+	progressTarWriter, plog := output.TarProgress(totalSize, tarWriter, progress)
 
 	if err := writeLayerToTar(path, ignore, progressTarWriter, plog); err != nil {
 		// Don't care about these errors since we'll be deleting the file anyways

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/kitops-ml/kitops/pkg/artifact"
 	"github.com/kitops-ml/kitops/pkg/lib/constants"
@@ -33,6 +34,7 @@ import (
 	"github.com/kitops-ml/kitops/pkg/lib/repo/local"
 	"github.com/kitops-ml/kitops/pkg/lib/repo/util"
 	"github.com/kitops-ml/kitops/pkg/output"
+	"github.com/vbauerster/mpb/v8"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/opencontainers/go-digest"
@@ -151,6 +153,10 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 
 	results := make(chan layerResult, 100)
 	currentIndex := 0
+	progress := mpb.New(
+		mpb.WithWidth(60),
+		mpb.WithRefreshRate(150*time.Millisecond),
+	)
 
 	if kitfile.Model != nil {
 		if kitfile.Model.Path != "" && !util.IsModelKitReference(kitfile.Model.Path) {
@@ -158,7 +164,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 			currentIndex++
 			eg.Go(func() error {
 				mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelBaseType, opts.LayerFormat, opts.Compression)
-				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, kitfile.Model.Path, mediaType, ignore)
+				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, kitfile.Model.Path, mediaType, ignore, progress)
 				if err != nil {
 					return err
 				}
@@ -174,7 +180,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 			path := part.Path
 			eg.Go(func() error {
 				mediaType := mediatype.New(opts.ModelFormat, mediatype.ModelPartBaseType, opts.LayerFormat, opts.Compression)
-				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
+				layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore, progress)
 				if err != nil {
 					return err
 				}
@@ -191,7 +197,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 		path := code.Path
 		eg.Go(func() error {
 			mediaType := mediatype.New(opts.ModelFormat, mediatype.CodeBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore, progress)
 			if err != nil {
 				return err
 			}
@@ -207,7 +213,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 		path := dataset.Path
 		eg.Go(func() error {
 			mediaType := mediatype.New(opts.ModelFormat, mediatype.DatasetBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore, progress)
 			if err != nil {
 				return err
 			}
@@ -223,7 +229,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 		path := docs.Path
 		eg.Go(func() error {
 			mediaType := mediatype.New(opts.ModelFormat, mediatype.DocsBaseType, opts.LayerFormat, opts.Compression)
-			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore)
+			layer, layerInfo, err := saveContentLayer(egCtx, localRepo, path, mediaType, ignore, progress)
 			if err != nil {
 				return err
 			}
@@ -256,7 +262,7 @@ func saveKitfileLayers(ctx context.Context, localRepo local.LocalRepo, kitfile *
 	return layers, diffIDs, err
 }
 
-func saveContentLayer(ctx context.Context, localRepo local.LocalRepo, path string, mediaType mediatype.MediaType, ignore ignore.Paths) (ocispec.Descriptor, *artifact.LayerInfo, error) {
+func saveContentLayer(ctx context.Context, localRepo local.LocalRepo, path string, mediaType mediatype.MediaType, ignore ignore.Paths, progress *mpb.Progress) (ocispec.Descriptor, *artifact.LayerInfo, error) {
 	// We want to store a gzipped tar file in store, but to do so we need a descriptor, so we have to compress
 	// to a temporary file. Ideally, we can also add this to the internal store by moving the file to avoid
 	// copying if possible.
@@ -264,7 +270,7 @@ func saveContentLayer(ctx context.Context, localRepo local.LocalRepo, path strin
 		// TODO: Add support for ModelPack's "raw" layer type
 		return ocispec.DescriptorEmptyJSON, nil, fmt.Errorf("Only tar-formatted layers are currently supported")
 	}
-	tempPath, desc, info, err := packLayerToTar(path, mediaType, ignore)
+	tempPath, desc, info, err := packLayerToTar(path, mediaType, ignore, progress)
 	if err != nil {
 		return ocispec.DescriptorEmptyJSON, nil, err
 	}
